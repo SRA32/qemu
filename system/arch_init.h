@@ -22,6 +22,7 @@ enum {
                             (1UL << SYS_EMU_TARGET_SH4EB),
     QEMU_ARCH_SPARC =       (1UL << SYS_EMU_TARGET_SPARC) |
                             (1UL << SYS_EMU_TARGET_SPARC64),
+    QEMU_ARCH_SRA32 =       (1UL << SYS_EMU_TARGET_SRA32),
     QEMU_ARCH_XTENSA =      (1UL << SYS_EMU_TARGET_XTENSA) |
                             (1UL << SYS_EMU_TARGET_XTENSAEB),
     QEMU_ARCH_OR1K =        (1UL << SYS_EMU_TARGET_OR1K),

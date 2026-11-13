@@ -1,0 +1,5 @@
+config SRA32
+    bool
+    default y
+    select SRA32_SIC
+    select SERIAL_MM

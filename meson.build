@@ -55,7 +55,7 @@ qapi_trace_events = []
 bsd_oses = ['gnu/kfreebsd', 'freebsd', 'netbsd', 'openbsd', 'dragonfly', 'darwin']
 supported_oses = ['windows', 'freebsd', 'netbsd', 'openbsd', 'darwin', 'sunos', 'linux', 'emscripten']
 supported_cpus = ['ppc64', 's390x', 'riscv64', 'x86_64',
-  'aarch64', 'loongarch64', 'mips64', 'sparc64', 'wasm64']
+  'aarch64', 'loongarch64', 'mips64', 'sparc64', 'sra32', 'wasm64']
 
 cpu = host_machine.cpu_family()
 
@@ -3684,6 +3684,7 @@ if have_system
     'hw/sh4',
     'hw/sparc',
     'hw/sparc64',
+    'hw/sra32',
     'hw/ssi',
     'hw/timer',
     'hw/tpm',

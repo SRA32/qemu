@@ -30,6 +30,7 @@
 #pragma GCC poison TARGET_SH4
 #pragma GCC poison TARGET_SPARC
 #pragma GCC poison TARGET_SPARC64
+#pragma GCC poison TARGET_SRA32
 #pragma GCC poison TARGET_TRICORE
 #pragma GCC poison TARGET_XTENSA
 
@@ -58,6 +59,7 @@
 #pragma GCC poison CONFIG_S390_DIS
 #pragma GCC poison CONFIG_SH4_DIS
 #pragma GCC poison CONFIG_SPARC_DIS
+#pragma GCC poison CONFIG_SRA32_DIS
 #pragma GCC poison CONFIG_XTENSA_DIS
 
 #pragma GCC poison CONFIG_HVF

@@ -1,0 +1,2 @@
+config SRA32
+    bool
