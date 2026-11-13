@@ -13,6 +13,7 @@
 #include "cpu.h"
 #include "exec/helper-proto.h"
 #include "exec/log.h"
+#include "exec/target_page.h"
 #include "accel/tcg/cpu-ldst.h"
 #include "hw/core/irq.h"
 #include "qemu/plugin.h"
