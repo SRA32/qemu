@@ -29,7 +29,6 @@ struct SRA32SICState {
     uint8_t dest[IRQ_MAX];
     uint32_t pend[CPU_MAX];
     uint32_t serv[CPU_MAX];
-    CPUSRA32State *envs[CPU_MAX];
     qemu_irq irqs[CPU_MAX];
 };
 

@@ -1,5 +1,6 @@
 #include "qemu/osdep.h"
 #include "qemu/qemu-print.h"
+#include "exec/log.h"
 #include "cpu.h"
 #include "instr.h"
 #include "tcg/tcg-op.h"
@@ -316,9 +317,10 @@ static void flg(DisasContext *dc, uint32_t code)
     if (funct == 0)
         // Read flags
         tcg_gen_mov_i32(reg, cpu_flags);
-    else
+    else {
         // Write flags (TODO: Handle protection)
-        tcg_gen_mov_i32(cpu_flags, reg);
+        gen_helper_write_flg(tcg_env, reg);
+    }
 }
 
 static void spc(DisasContext *dc, uint32_t code)
@@ -341,14 +343,18 @@ static void iret(DisasContext *dc, uint32_t code)
 static void cr(DisasContext *dc, uint32_t code)
 {
     uint8_t funct = INSTR_GET_FUNCT_I(code);
+    uint8_t cr_num = INSTR_GET_IMM(code) & 0xF;
     TCGv_i32 reg = cpu_regs[INSTR_GET_RD_I(code)];
-    TCGv_i32 cr = cpu_crs[INSTR_GET_IMM(code) & 0xF];
+    TCGv_i32 cr = cpu_crs[cr_num];
     if (funct == 0)
         // Read cr
         tcg_gen_mov_i32(reg, cr);
-    else
+    else {
         // Write cr
-        tcg_gen_mov_i32(cr, reg);
+        TCGv_i32 tmp = tcg_temp_new_i32();
+        tcg_gen_movi_i32(tmp, cr_num);
+        gen_helper_write_cr(tcg_env, tmp, reg);
+    }
 }
 
 static MemOp mem_sizes[] = { MO_UB, MO_LEUW, MO_LEUL };
@@ -387,48 +393,98 @@ static void sui(DisasContext *dc, uint32_t code)
 
 // Jump format
 
-SRA32Cond scond[] = {
-    { 0, 0 },
-    [FUNCT_COND_EQ] = { FLAG_Z, FLAG_Z },
-    [FUNCT_COND_NE] = { FLAG_Z, 0 },
-    [FUNCT_COND_LT] = { FLAG_N | FLAG_V, FLAG_N },
-    [FUNCT_COND_GT] = { FLAG_Z | FLAG_N | FLAG_V, FLAG_N | FLAG_V },
-    [FUNCT_COND_LTE] = { FLAG_Z | FLAG_N | FLAG_V, FLAG_Z | FLAG_N },
-    [FUNCT_COND_GTE] = { FLAG_N | FLAG_V, 0 },
-};
+static void get_flag(TCGv_i32 dst, uint32_t flag)
+{
+    tcg_gen_andi_i32(dst, cpu_flags, flag);
+    tcg_gen_setcondi_i32(TCG_COND_NE, dst, dst, 0);          /* 0 or 1 */
+}
 
-SRA32Cond ucond[] = {
-    { 0, 0 },
-    [FUNCT_COND_EQ] = { FLAG_Z, FLAG_Z },
-    [FUNCT_COND_NE] = { FLAG_Z, 0 },
-    [FUNCT_COND_LT] = { FLAG_C, 0 },
-    [FUNCT_COND_GT] = { FLAG_Z | FLAG_C, FLAG_C },
-    [FUNCT_COND_LTE] = { FLAG_Z | FLAG_C, FLAG_Z },
-    [FUNCT_COND_GTE] = { FLAG_C, FLAG_C },
-};
+static void gen_taken(TCGv_i32 r, uint8_t funct)
+{
+    TCGv_i32 z = tcg_temp_new_i32();
+    TCGv_i32 a = tcg_temp_new_i32();
+    TCGv_i32 b = tcg_temp_new_i32();
+
+    get_flag(z, FLAG_Z);
+
+    if (funct & FUNCT_UCOND) {
+        get_flag(a, FLAG_C);
+
+        switch (funct & FUNCT_COND_MASK) {
+            case FUNCT_COND_EQ:
+                tcg_gen_mov_i32(r, z);
+                break;
+            case FUNCT_COND_NE:
+                tcg_gen_xori_i32(r, z, 1);
+                break;
+            case FUNCT_COND_LT:
+                tcg_gen_xori_i32(r, a, 1);
+                break;
+            case FUNCT_COND_GTE:
+                tcg_gen_mov_i32(r, a);
+                break;
+            case FUNCT_COND_GT:
+                tcg_gen_andc_i32(r, a, z);
+                break;
+            case FUNCT_COND_LTE:
+                tcg_gen_xori_i32(b, a, 1);
+                tcg_gen_or_i32(r, b, z);
+                break;
+            default:
+                tcg_gen_movi_i32(r, 0);
+                break;
+        }
+    } else {
+        get_flag(a, FLAG_N);
+        get_flag(b, FLAG_V);
+        tcg_gen_xor_i32(a, a, b);
+
+        switch (funct & FUNCT_COND_MASK) {
+            case FUNCT_COND_EQ:
+                tcg_gen_mov_i32(r, z);
+                break;
+            case FUNCT_COND_NE:
+                tcg_gen_xori_i32(r, z, 1);
+                break;
+            case FUNCT_COND_LT:
+                tcg_gen_mov_i32(r, a);
+                break;
+            case FUNCT_COND_GTE:
+                tcg_gen_xori_i32(r, a, 1);
+                break;
+            case FUNCT_COND_GT: 
+                tcg_gen_or_i32(r, z, a);
+                tcg_gen_xori_i32(r, r, 1);
+                break;
+            case FUNCT_COND_LTE:
+                tcg_gen_or_i32(r, z, a);
+                break;
+            default:
+                tcg_gen_movi_i32(r, 0);
+                break;
+        }
+    }
+}
 
 static void br(DisasContext *dc, uint32_t code)
 {
     uint8_t funct = INSTR_GET_FUNCT_J(code);
-    SRA32Cond *cond = NULL;
-    if (funct & FUNCT_UCOND)
-        cond = &ucond[funct & FUNCT_COND_MASK];
-    else
-        cond = &scond[funct & FUNCT_COND_MASK];
+    int32_t off = sextract32(INSTR_GET_IMM_J(code), 0, 24) * 4;
+    uint32_t dest = dc->pc + off;
 
-    int32_t addr = INSTR_GET_IMM_J(code);
-    if (addr & 0x800000) addr -= 0x1000000;
-    addr <<= 2;
+    if ((funct & FUNCT_COND_MASK) == 0) {
+        gen_goto_tb(dc, 0, dest);
+        return;
+    }
 
     TCGLabel *not_taken = gen_new_label();
-    TCGv_i32 t0 = tcg_temp_new_i32();
+    TCGv_i32 t = tcg_temp_new_i32();
 
-    tcg_gen_andi_i32(t0, cpu_flags, cond->mask);
-    tcg_gen_brcondi_i32(TCG_COND_NE, t0, cond->value, not_taken);
-    gen_goto_tb(dc, 0, dc->pc + addr);
+    gen_taken(t, funct);
+    tcg_gen_brcondi_i32(TCG_COND_EQ, t, 0, not_taken);
+    gen_goto_tb(dc, 0, dest);
     gen_set_label(not_taken);
-
-    dc->base.is_jmp = DISAS_UPDATE;
+    gen_goto_tb(dc, 1, dc->pc + 4);
 }
 
 static void call(DisasContext *dc, uint32_t code)

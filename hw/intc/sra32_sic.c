@@ -162,4 +162,3 @@ static void sic_register_types(void)
 }
 
 type_init(sic_register_types)
-

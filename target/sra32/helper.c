@@ -11,9 +11,12 @@
 #include "qemu/osdep.h"
 #include "qemu/bitops.h"
 #include "cpu.h"
+#include "exec/cputlb.h"
 #include "exec/helper-proto.h"
 #include "exec/log.h"
 #include "exec/target_page.h"
+#include "system/memory.h"
+#include "system/address-spaces.h"
 #include "accel/tcg/cpu-ldst.h"
 #include "hw/core/irq.h"
 #include "qemu/plugin.h"
@@ -78,37 +81,86 @@ uint32_t helper_divu(CPUSRA32State *env, uint32_t num, uint32_t den)
     return ret;
 }
 
+void helper_write_flg(CPUSRA32State *env, uint32_t val)
+{
+    uint32_t old_val = env->flags;
+    env->flags = val;
+
+    if ((old_val ^ val) & FLAG_PE) {
+        tlb_flush(env_cpu(env));
+    }
+}
+
+void helper_write_cr(CPUSRA32State *env, uint32_t cr, uint32_t val)
+{
+    env->crs[cr] = val;
+    if (cr == CR_PTBL) {
+        tlb_flush(env_cpu(env));
+    }
+}
+
 int get_phys_nommu(CPUSRA32State *env, vaddr addr, hwaddr *phys)
 {
     *phys = addr;
     return 0;
 }
 
-int get_phys_mmu(CPUSRA32State *env, vaddr addr, hwaddr *phys)
+int get_phys_mmu(CPUSRA32State *env, int *prot, MMUAccessType access_type, vaddr addr, hwaddr *phys)
 {
+    *prot = 0;
+    *phys = 0;
+    CPUState *cs = env_cpu(env);
+
+    addr &= TARGET_PAGE_MASK;
+
     uint32_t ptbl = env->crs[CR_PTBL];
     if (!ptbl) {
         *phys = 0;
         return -1;
     }
 
-    uint32_t tidx = (addr >> 12) & 0x1FF;
-    uint32_t bidx = (addr >> 21) & 0x1FF;
+    uint32_t bidx = (addr >> 22) & 0x3FF;
+    uint32_t pidx = (addr >> 12) & 0x3FF;
 
-    uint32_t bottom = cpu_ldl_le_data(env, ptbl + (tidx << 2));
-    if (!bottom) {
-        *phys = 0;
+    MemTxResult result;
+    uint32_t bottom = address_space_ldl_le(cs->as, ptbl + (bidx * 4), MEMTXATTRS_UNSPECIFIED, &result);
+    if (result != MEMTX_OK) {
+        return -1;
+    }
+
+    if (!(bottom & SRA32_PAGE_VALID)) {
         return -1;
     }
 
     bottom &= TARGET_PAGE_MASK;
 
-    uint32_t page = cpu_ldl_le_data(env, bottom + (bidx << 2));
-    if (!page) {
-        *phys = 0;
+    uint32_t page = address_space_ldl_le(cs->as, bottom + (pidx * 4), MEMTXATTRS_UNSPECIFIED, &result);
+    if (result != MEMTX_OK) {
         return -1;
     }
 
+    *prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
     *phys = page;
+
+    if (!(page & SRA32_PAGE_VALID)) {
+        qemu_log("Page 0x%lx isn't valid.\n", addr);
+        return -1;
+    }
+
+    *prot |= PAGE_READ;
+
+    if (page & SRA32_PAGE_WRITE) {
+        *prot |= PAGE_WRITE;
+    } else {
+        if (access_type == MMU_DATA_STORE) {
+            qemu_log("Page isn't writeable.\n");
+            return -1;
+        }
+    }
+
+    *prot |= PAGE_EXEC;
+
+    // TODO: Handle user.
+
     return 0;
 }

@@ -76,10 +76,11 @@ static bool sra32_cpu_tlb_fill(CPUState *cs, vaddr addr, int size, MMUAccessType
 {
     CPUSRA32State *env = &SRA32_CPU(cs)->env;
     hwaddr paddr;
+    int prot;
 
     if (env->flags & FLAG_PE) {
         // Paging enabled.
-        int res = get_phys_mmu(env, addr, &paddr);
+        int res = get_phys_mmu(env, &prot, access_type, addr, &paddr);
         if (unlikely(res < 0)) {
             if (probe) {
                 return false;
@@ -92,12 +93,14 @@ static bool sra32_cpu_tlb_fill(CPUState *cs, vaddr addr, int size, MMUAccessType
             return false;
         }
     } else {
+        prot = PAGE_READ | PAGE_WRITE | PAGE_EXEC;
         get_phys_nommu(env, addr, &paddr);
     }
 
     tlb_set_page(cs, addr & TARGET_PAGE_MASK, paddr & TARGET_PAGE_MASK,
-                 PAGE_READ | PAGE_WRITE | PAGE_EXEC, mmu_idx,
+                 prot, mmu_idx,
                  TARGET_PAGE_SIZE);
+
     return true;
 }
 

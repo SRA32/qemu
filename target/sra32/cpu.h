@@ -43,6 +43,11 @@
 #define EXCP_UNALIGNED_ACCESS 1
 #define EXCP_PAGE_FAULT 2
 
+#define SRA32_PAGE_VALID 1
+#define SRA32_PAGE_WRITE 2
+#define SRA32_PAGE_USER 4
+#define SRA32_PAGE_EXEC 8
+
 typedef struct CPUArchState {
     uint32_t regs[REG_COUNT];
     uint32_t crs[CR_COUNT];
@@ -73,6 +78,6 @@ void sra32_raise_excp(CPUSRA32State *env, int excp, uint32_t retpc);
 void sra32_translate_init(void);
 void sra32_translate_code(CPUState *cs, TranslationBlock *tb, int *max_insn, vaddr pc, void *host_pc);
 int get_phys_nommu(CPUSRA32State *env, vaddr addr, hwaddr *phys);
-int get_phys_mmu(CPUSRA32State *env, vaddr addr, hwaddr *phys);
+int get_phys_mmu(CPUSRA32State *env, int *prot, MMUAccessType access_type, vaddr addr, hwaddr *phys);
 
 #endif
