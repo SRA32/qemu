@@ -20,9 +20,9 @@
 
 static void sic_set_irq(void *opaque, int irq, int level)
 {
-    SRA32SICState *s = opaque;
+    SRA32SICState *sic = opaque;
 
-    uint8_t dest = s->dest[irq];
+    uint8_t dest = sic->dest[irq];
     if (dest == 0xFF) {
         return; // Masked
     }
@@ -30,20 +30,30 @@ static void sic_set_irq(void *opaque, int irq, int level)
     uint8_t cpu = dest & CPU_MASK;
 
     if (level) {
-        s->pend[cpu] |= 1 << irq;
+        sic->pend[cpu] |= 1 << irq;
         qemu_log("SIC: Irq #%d fired (To cpu %d, prio %d).\n", irq, cpu, dest & PRIO_MASK);
     } else {
-        s->pend[cpu] &= ~(1 << irq);
+        sic->pend[cpu] &= ~(1 << irq);
     }
 
-    // TODO: If the irq being raised has a greater priority, interrupt.
-    if (!s->serv[cpu])
-        qemu_set_irq(s->irqs[cpu], level);
+    if (!sic->serv[cpu]) {
+        qemu_set_irq(sic->irqs[cpu], level);
+        sic->serv[cpu] = irq;
+    }
+    else {
+        // Find out if the irq being raised has a greater priority
+        uint8_t prio_serv = sic->dest[sic->serv[cpu]] & PRIO_MASK;
+        uint8_t prio = dest & PRIO_MASK;
+        if (prio > prio_serv) {
+            qemu_log("SIC: Interrupt with greater priority fired. TODO.\n");
+            return;
+        }
+    }
 }
 
 static uint64_t sic_read(void *opaque, hwaddr addr, unsigned size)
 {
-    SRA32SICState *s = opaque;
+    SRA32SICState *sic = opaque;
     CPUState *cpu = current_cpu;
     switch (addr) {
         case SIC_REG_DEST...SIC_REG_DEST+IRQ_MAX-1:
@@ -51,29 +61,9 @@ static uint64_t sic_read(void *opaque, hwaddr addr, unsigned size)
                 qemu_log("SIC: Invalid read size 0x%" HWADDR_PRIX "\n", addr);
                 return UINT64_MAX;
             }
-            return s->dest[addr];
-        case SIC_REG_CLAIM: {
-            uint32_t index = cpu->cpu_index;
-            int      highest = -1;
-            uint8_t  vec = 0;
-
-            for (int i = 0; i < IRQ_MAX; i++) {
-                bool pend = s->pend[index] & (1 << i);
-                if (!pend)
-                    continue;
-
-                int prio = s->dest[i] & PRIO_MASK;
-                if (prio > highest) {
-                    highest = prio;
-                    vec = i;
-                }
-            }
-
-            s->pend[index] &= ~(1 << vec);
-            s->serv[index] = 1;
-
-            return vec;
-        }
+            return sic->dest[addr];
+        case SIC_REG_CLAIM:
+            return sic->serv[cpu->cpu_index];
         default:
             qemu_log("SIC: Invalid read at unimplemented register 0x%" HWADDR_PRIX "\n", addr);
             return UINT64_MAX;
@@ -83,21 +73,44 @@ static uint64_t sic_read(void *opaque, hwaddr addr, unsigned size)
 
 static void sic_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
 {
-    SRA32SICState *s = opaque;
+    SRA32SICState *sic = opaque;
     switch (addr) {
         case SIC_REG_DEST...SIC_REG_DEST+IRQ_MAX:
             if (size > 1) {
                 qemu_log("SIC: Invalid write size 0x%" HWADDR_PRIX "\n", addr);
                 return;
             }
-            s->dest[addr] = val & 0xFF;
+            sic->dest[addr] = val & 0xFF;
             return;
         case SIC_REG_EOI: {
             uint32_t index = current_cpu->cpu_index;
-            s->serv[index] = 0;
-            if (s->pend[index] != 0) {
-                qemu_set_irq(s->irqs[index], 1);
+            sic->pend[index] &= ~(1 << sic->serv[index]);
+
+            sic->serv[index] = 0;
+            if (sic->pend[index] == 0) {
+                return;
             }
+
+            // Find out which interrupt has the highest priority and fire that.
+            int highest = -1;
+            uint8_t vec = 0;
+            for (int i = 0; i < IRQ_MAX; i++) {
+                bool pend = sic->pend[index] & (1 << i);
+                if (!pend) {
+                    continue;
+                }
+
+                int prio = sic->dest[i] & PRIO_MASK;
+                if (prio > highest) {
+                    highest = prio;
+                    vec = i;
+                }
+            }
+
+            sic->pend[index] &= ~(1 << vec);
+            sic->serv[index] = vec;
+
+            qemu_set_irq(sic->irqs[index], 1);
             return;
         }
         default:
@@ -119,25 +132,25 @@ static const MemoryRegionOps sic_ops = {
 static void sic_init(Object *obj)
 {
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
-    SRA32SICState *s = SRA32_SIC(obj);
+    SRA32SICState *sic = SRA32_SIC(obj);
 
-    memory_region_init_io(&s->mem, OBJECT(s), &sic_ops, s,
+    memory_region_init_io(&sic->mem, OBJECT(sic), &sic_ops, sic,
                           "sra32-sic", 0x100);
-    sysbus_init_mmio(sbd, &s->mem);
+    sysbus_init_mmio(sbd, &sic->mem);
 
     qdev_init_gpio_in(DEVICE(sbd), sic_set_irq, IRQ_MAX);
 
     for (int i = 0; i < CPU_MAX; i++) {
-        sysbus_init_irq(sbd, &s->irqs[i]);
+        sysbus_init_irq(sbd, &sic->irqs[i]);
     }
 }
 
 static void sic_realize(DeviceState *dev, Error **errp)
 {
-    SRA32SICState *s = SRA32_SIC(dev);
+    SRA32SICState *sic = SRA32_SIC(dev);
 
     for (int i = 0; i < IRQ_MAX; i++) {
-        s->dest[i] = 0xFF; // Masked
+        sic->dest[i] = 0xFF; // Masked
     }
 }
 

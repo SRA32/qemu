@@ -2,8 +2,10 @@ config SRA32
     bool
     default y
     imply PCI_DEVICES
-    select SRA32_SIC
+    select SRA32_IC
     select PCI
     select PCI_EXPRESS_GENERIC_BRIDGE
     select PL110
+    select FDT
+    select DEVICE_TREE
     select SERIAL_MM

@@ -16,6 +16,7 @@
 #include "exec/cpu-defs.h"
 #include "exec/cpu-interrupt.h"
 #include "system/memory.h"
+#include "qemu/timer.h"
 
 #define FLAG_Z (1 << 0)
 #define FLAG_N (1 << 1)
@@ -36,6 +37,8 @@
 #define CR_SVFL 2
 #define CR_ESRC 3
 #define CR_PTBL 8
+#define CR_TDEAD0 9
+#define CR_TDEAD1 10
 
 #define MAX_IRQ 32
 
@@ -54,6 +57,10 @@ typedef struct CPUArchState {
     uint32_t pc;
     uint32_t flags;
     uint32_t intr;
+
+    // LL/SC Related
+    target_ulong load_addr;
+    target_ulong load_val;
 } CPUSRA32State;
 
 struct ArchCPU {
@@ -61,6 +68,9 @@ struct ArchCPU {
 
     CPUSRA32State env;
     qemu_irq irq;
+    qemu_irq local_irq;
+
+    QEMUTimer *local_timer;
 };
 
 struct SRA32CPUClass {
@@ -77,6 +87,7 @@ void sra32_cpu_do_interrupt(CPUState *cs);
 void sra32_raise_excp(CPUSRA32State *env, int excp, uint32_t retpc);
 void sra32_translate_init(void);
 void sra32_translate_code(CPUState *cs, TranslationBlock *tb, int *max_insn, vaddr pc, void *host_pc);
+void sra32_timer_set_deadline(SRA32CPU *cpu, uint64_t deadline);
 int get_phys_nommu(CPUSRA32State *env, vaddr addr, hwaddr *phys);
 int get_phys_mmu(CPUSRA32State *env, int *prot, MMUAccessType access_type, vaddr addr, hwaddr *phys);
 

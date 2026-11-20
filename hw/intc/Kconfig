@@ -81,7 +81,7 @@ config SIFIVE_PLIC
     bool
     select MSI_NONBROKEN
 
-config SRA32_SIC
+config SRA32_IC
     bool
 
 config GOLDFISH_PIC

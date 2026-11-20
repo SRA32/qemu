@@ -25,9 +25,10 @@ void sra32_cpu_do_interrupt(CPUState *cs)
 {
     CPUSRA32State *env = cpu_env(cs);
     uint32_t ret = env->pc;
+    env->load_addr = -1;
 
     if (cpu_test_interrupt(cs, CPU_INTERRUPT_HARD)) {
-        uint32_t intb = env->crs[CR_INTB] + 4;
+        uint32_t intb = env->crs[CR_INTB] + (cs->exception_index == 0 ? 4 : 8);
 
         env->crs[CR_SVPC] = ret;
         env->crs[CR_SVFL] = env->flags;
@@ -94,8 +95,16 @@ void helper_write_flg(CPUSRA32State *env, uint32_t val)
 void helper_write_cr(CPUSRA32State *env, uint32_t cr, uint32_t val)
 {
     env->crs[cr] = val;
-    if (cr == CR_PTBL) {
-        tlb_flush(env_cpu(env));
+
+    switch (cr) {
+        case CR_PTBL:
+            tlb_flush(env_cpu(env));
+            break;
+        case CR_TDEAD1: {
+            uint64_t deadline = (((uint64_t)val) << 32) | ((uint64_t)env->crs[CR_TDEAD0]);
+            sra32_timer_set_deadline(SRA32_CPU(env_cpu(env)), deadline);
+            break;
+        }
     }
 }
 

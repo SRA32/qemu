@@ -23,6 +23,9 @@ static TCGv_i32 cpu_flags;
 static TCGv_i32 cpu_regs[REG_COUNT];
 static TCGv_i32 cpu_crs[CR_COUNT];
 
+static TCGv_i32 cpu_load_addr;
+static TCGv_i32 cpu_load_val;
+
 static const char *reg_names[REG_COUNT] = {
     "X0", "RP", "SP", "FP", "R00",
     "R01",  "R02",  "R03",  "R04", 
@@ -36,8 +39,8 @@ static const char *reg_names[REG_COUNT] = {
 
 static const char *cr_names[CR_COUNT] = {
     "INTB", "SVPC", "SVFL", "ESRC",
-    "????", "????", "????", "PTBL",
     "????", "????", "????", "????",
+    "PTBL", "TIM0", "TIM1", "????",
     "????", "????", "????", "????"
 };
 
@@ -59,6 +62,9 @@ void sra32_translate_init(void)
         cpu_regs[i] = tcg_global_mem_new_i32(tcg_env, offsetof(CPUSRA32State, regs[i]), reg_names[i]);
     for (int i = 0; i < CR_COUNT; i++)
         cpu_crs[i] = tcg_global_mem_new_i32(tcg_env, offsetof(CPUSRA32State, crs[i]), cr_names[i]);
+
+    cpu_load_addr = tcg_global_mem_new_i32(tcg_env, offsetof(CPUSRA32State, load_addr), "load_addr");
+    cpu_load_val = tcg_global_mem_new_i32(tcg_env, offsetof(CPUSRA32State, load_val), "load_val");
 }
 
 static void sra32_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
@@ -237,6 +243,9 @@ static void alu(DisasContext *dc, uint32_t code)
 		case FUNCT_NOT:
             tcg_gen_not_i32(cpu_regs[rd], t0);
 			break;
+        case FUNCT_BSWP:
+            tcg_gen_bswap32_i32(cpu_regs[rd], t0);
+			break;
     }
 
     tcg_gen_setcondi_i32(TCG_COND_EQ, z, cpu_regs[rd], 0);
@@ -330,12 +339,28 @@ static void spc(DisasContext *dc, uint32_t code)
     dc->base.is_jmp = DISAS_JUMP;
 }
 
+static void calr(DisasContext *dc, uint32_t code)
+{
+    uint8_t reg = INSTR_GET_RD_R(code);
+
+    tcg_gen_movi_i32(cpu_regs[REG_RP], dc->pc + 4);
+    tcg_gen_mov_i32(cpu_pc, cpu_regs[reg]);
+
+    dc->base.is_jmp = DISAS_JUMP;
+}
+
 static void iret(DisasContext *dc, uint32_t code)
 {
     // TODO: Handle protection.
+    tcg_gen_movi_i32(cpu_load_addr, -1);
     tcg_gen_mov_i32(cpu_pc, cpu_crs[CR_SVPC]);
     tcg_gen_mov_i32(cpu_flags, cpu_crs[CR_SVFL]);
     dc->base.is_jmp = DISAS_JUMP;
+}
+
+static void fence(DisasContext *dc, uint32_t code)
+{
+    tcg_gen_mb(TCG_MO_ALL | TCG_BAR_SC);
 }
 
 // Imm format
@@ -381,6 +406,45 @@ static void st(DisasContext *dc, uint32_t code)
     tcg_gen_addi_i32(addr, cpu_regs[INSTR_GET_RT_I(code)], imm);
 
     tcg_gen_qemu_st_i32(cpu_regs[INSTR_GET_RD_I(code)], addr, 0, mem_sizes[funct]);
+
+    tcg_gen_movi_i32(cpu_load_addr, -1);
+}
+
+static void ll(DisasContext *dc, uint32_t code)
+{
+    TCGv_i32 addr = tcg_temp_new_i32();
+    int32_t imm = sextract32(INSTR_GET_IMM(code), 0, 12);
+
+    tcg_gen_addi_i32(addr, cpu_regs[INSTR_GET_RT_I(code)], imm);
+    tcg_gen_qemu_ld_i32(cpu_regs[INSTR_GET_RD_I(code)], addr, 0, MO_TEUL | MO_ALIGN);
+    tcg_gen_mov_i32(cpu_load_addr, addr);
+    tcg_gen_mov_i32(cpu_load_val, cpu_regs[INSTR_GET_RD_I(code)]);
+}
+
+static void sc(DisasContext *dc, uint32_t code)
+{
+    TCGv_i32 addr = tcg_temp_new_i32();
+    TCGv_i32 val = tcg_temp_new_i32();
+    TCGv_i32 old = tcg_temp_new_i32();
+    TCGLabel *fail = gen_new_label();
+    TCGLabel *final = gen_new_label();
+    int32_t imm = sextract32(INSTR_GET_IMM(code), 0, 12);
+
+    tcg_gen_addi_i32(addr, cpu_regs[INSTR_GET_RT_I(code)], imm);
+    tcg_gen_mov_i32(val, cpu_regs[INSTR_GET_RD_I(code)]);
+
+    // If the ll address differs, fail
+    tcg_gen_brcond_i32(TCG_COND_NE, addr, cpu_load_addr, fail);
+    // If the ll value differs from the value at that address, set 0 to rd.
+    tcg_gen_atomic_cmpxchg_i32(old, addr, cpu_load_val, val, 0, MO_TEUL | MO_ALIGN);
+    tcg_gen_setcond_i32(TCG_COND_EQ, cpu_regs[INSTR_GET_RD_I(code)], old, cpu_load_val);
+    tcg_gen_br(final);
+
+    gen_set_label(fail);
+    tcg_gen_movi_i32(cpu_regs[INSTR_GET_RD_I(code)], 0);
+
+    gen_set_label(final);
+    tcg_gen_movi_i32(cpu_load_addr, -1);
 }
 
 // Upper format
@@ -498,8 +562,8 @@ static void call(DisasContext *dc, uint32_t code)
 }
 
 static const void *lookup_table[4][16] = {
-	{nop, alu, sext, mov, cmp, stk, flg, spc, NULL, iret},
-	{alu, cr, ld, st},
+	{nop, alu, sext, mov, cmp, stk, flg, spc, calr, NULL, iret, fence},
+	{alu, cr, ld, st, ll, sc},
 	{sui},
 	{br, call}
 };

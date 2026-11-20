@@ -68,8 +68,12 @@ static bool sra32_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
     if ((env->flags & FLAG_IE) == 0)
         return false;
 
-    sra32_cpu_do_interrupt(cs);
-    return true;
+    if (interrupt_request & CPU_INTERRUPT_HARD) {
+        sra32_cpu_do_interrupt(cs);
+        return true;
+    }
+
+    return false;
 }
 
 static bool sra32_cpu_tlb_fill(CPUState *cs, vaddr addr, int size, MMUAccessType access_type, int mmu_idx, bool probe, uintptr_t retaddr)
@@ -113,8 +117,9 @@ static void sra32_cpu_set_int(void *opaque, int irq, int level)
 {
     SRA32CPU *cpu = opaque;
     CPUState *cs = CPU(cpu);
+    cs->exception_index = irq;
 
-    if (level) {
+    if (level & 0xFF) {
         cpu_interrupt(cs, CPU_INTERRUPT_HARD);
     } else {
         cpu_reset_interrupt(cs, CPU_INTERRUPT_HARD);
@@ -125,8 +130,8 @@ void sra32_cpu_dump_state(CPUState *cs, FILE *f, int flags)
 {
     static const char *cr_names[CR_COUNT] = {
         "INTB", "SVPC", "SVFL", "ESRC",
-        "????", "????", "????", "PTBL",
         "????", "????", "????", "????",
+        "PTBL", "TIM0", "TIM1", "????",
         "????", "????", "????", "????"
     };
 
@@ -145,6 +150,11 @@ void sra32_cpu_dump_state(CPUState *cs, FILE *f, int flags)
         qemu_fprintf(f, "%s=%08x%c", cr_names[i], env->crs[i], (i % 4 == 3) ? '\n' : ' ');
 }
 
+void sra32_timer_set_deadline(SRA32CPU *cpu, uint64_t deadline)
+{
+    timer_mod_ns(cpu->local_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + deadline);
+}
+
 static void sra32_cpu_reset_hold(Object *obj, ResetType type)
 {
     CPUState *cs = CPU(obj);
@@ -153,7 +163,12 @@ static void sra32_cpu_reset_hold(Object *obj, ResetType type)
     if (scc->parent_phases.hold)
         scc->parent_phases.hold(obj, type);
 
-    memset(cpu_env(cs), 0, sizeof(CPUSRA32State));
+    SRA32_CPU(cs)->env.pc = 0;
+    SRA32_CPU(cs)->env.flags = 0;
+    SRA32_CPU(cs)->env.regs[0] = 0;
+
+    SRA32_CPU(cs)->env.load_addr = -1;
+
     cs->exception_index = -1;
 }
 
@@ -191,7 +206,10 @@ static void sra32_cpu_init(Object *obj)
 {
     SRA32CPU *cpu = SRA32_CPU(obj);
 
+    memset(&cpu->env, 0, sizeof(CPUSRA32State));
+
     cpu->irq = qemu_allocate_irq(sra32_cpu_set_int, cpu, 0);
+    cpu->local_irq = qemu_allocate_irq(sra32_cpu_set_int, cpu, 1);
 }
 
 static const struct SysemuCPUOps sra32_sysemu_ops = {
@@ -201,6 +219,8 @@ static const struct SysemuCPUOps sra32_sysemu_ops = {
 
 static const TCGCPUOps sra32_tcg_ops = {
     .guest_default_memory_order = 0,
+    .mttcg_supported = true,
+
     .initialize = sra32_translate_init,
     .translate_code = sra32_translate_code,
     .get_tb_cpu_state = sra32_get_tb_cpu_state,

@@ -15,8 +15,8 @@
 #include "cpu.h"
 #include "qom/object.h"
 
-#define IRQ_MAX 32
 #define CPU_MAX 32
+#define IRQ_MAX 32
 
 #define CPU_MASK 0x1F
 #define PRIO_MASK 0x80

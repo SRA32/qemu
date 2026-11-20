@@ -74,6 +74,7 @@
 #define FUNCT_SHR 14
 #define FUNCT_SAR 15
 #define FUNCT_NOT 16
+#define FUNCT_BSWP 17
 
 #define FUNCT_UCOND (1 << 3)
 #define FUNCT_COND_MASK (0b111)

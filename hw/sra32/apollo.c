@@ -10,6 +10,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
+#include "qemu/log.h"
 #include "qapi/error.h"
 #include "cpu.h"
 #include "hw/sra32/apollo.h"
@@ -22,6 +23,7 @@
 #include "hw/ide/ahci-pci.h"
 #include "hw/ide/ide-bus.h"
 #include "system/address-spaces.h"
+#include "system/device_tree.h"
 #include "system/reset.h"
 #include "system/system.h"
 #include "qom/object.h"
@@ -29,6 +31,54 @@
 static void sra32_cpu_reset_cb(void *opaque)
 {
     cpu_reset(CPU(opaque));
+}
+
+static void apollo_fdt_add_dev(void *fdt, const char *name, const char *compat, hwaddr base, hwaddr len, int32_t irq)
+{
+    char path[128];
+
+    snprintf(path, sizeof(path), "/soc/%s@%" HWADDR_PRIx, name, base);
+
+    qemu_fdt_add_subnode(fdt, path);
+    qemu_fdt_setprop_string(fdt, path, "compatible", compat);
+    qemu_fdt_setprop_sized_cells(fdt, path, "reg", 1, base, 1, len);
+    if (irq >= 0)
+        qemu_fdt_setprop_cells(fdt, path, "interrupts", irq);
+}
+
+static void apollo_init_fdt(ApolloMachineState *ams)
+{
+    void *fdt = create_device_tree(&ams->fdt_size);
+    if (!fdt) {
+        error_report("Apollo: Failed to create device tree");
+        exit(1);
+    }
+
+    qemu_fdt_add_subnode(fdt, "/memory@100000");
+    qemu_fdt_setprop_string(fdt, "/memory@100000", "device_type", "memory");
+    qemu_fdt_setprop_sized_cells(
+        fdt, "/memory@100000", "reg",
+        1, 0x00100000,
+        1, ams->ram_size);
+
+    // Initialize /soc
+    qemu_fdt_add_subnode(fdt, "/soc");
+
+    qemu_fdt_setprop_cell(fdt, "/soc", "#address-cells", 1);
+    qemu_fdt_setprop_cell(fdt, "/soc", "#size-cells", 1);
+    qemu_fdt_setprop(fdt, "/soc", "ranges", NULL, 0);
+
+    ams->fdt = fdt;
+}
+
+static void apollo_copy_fdt(ApolloMachineState *ams)
+{
+    hwaddr fdt_base = ROUND_DOWN(APOLLO_RAM_BASE + ams->ram_size - ams->fdt_size, 16);
+
+    rom_add_blob_fixed("apollo-dtb", ams->fdt, ams->fdt_size, fdt_base);
+
+    for (int i = 0; i < ams->num_cpus; i++)
+        ams->cpus[i]->env.regs[31] = fdt_base;
 }
 
 static void apollo_init_sic(ApolloMachineState *ams)
@@ -48,6 +98,35 @@ static void apollo_init_sic(ApolloMachineState *ams)
     }
 
     sysbus_mmio_map(sic, 0, APOLLO_SIC_BASE);
+
+    MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(sic), 0);
+    hwaddr size = memory_region_size(mr);
+
+    apollo_fdt_add_dev(ams->fdt, "sic", "sra32,apollo-sic", APOLLO_SIC_BASE, size, -1);
+}
+
+static void apollo_init_lic(ApolloMachineState *ams)
+{
+    SysBusDevice *lic;
+
+    object_initialize_child(
+        OBJECT(ams), "lic",
+        &ams->lic, TYPE_SRA32_LIC
+    );
+
+    lic = SYS_BUS_DEVICE(&ams->lic);
+    sysbus_realize(lic, &error_abort);
+
+    for (int i = 0; i < ams->num_cpus; i++) {
+        sysbus_connect_irq(lic, i, SRA32_CPU(ams->cpus[i])->local_irq);
+    }
+
+    sysbus_mmio_map(lic, 0, APOLLO_LIC_BASE);
+
+    MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(lic), 0);
+    hwaddr size = memory_region_size(mr);
+
+    apollo_fdt_add_dev(ams->fdt, "lic", "sra32,apollo-lic", APOLLO_LIC_BASE, size, -1);
 }
 
 static void apollo_init_gpex_pcie(ApolloMachineState *ams)
@@ -111,18 +190,58 @@ static void apollo_init_pl110(ApolloMachineState *ams)
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
 
     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, APOLLO_PL110_BASE);
+
+    MemoryRegion *mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0);
+    hwaddr size = memory_region_size(mr);
+
+    apollo_fdt_add_dev(ams->fdt, "pl110", "arm,pl110", APOLLO_PL110_BASE, size, 2);
+}
+
+static void apollo_init_uart(ApolloMachineState *ams)
+{
+    qemu_irq uart_irq = qdev_get_gpio_in(DEVICE(&ams->sic), 1);
+    serial_mm_init(get_system_memory(), APOLLO_UART_BASE, 2, uart_irq, 115200, serial_hd(0), DEVICE_LITTLE_ENDIAN);
+    apollo_fdt_add_dev(ams->fdt, "uart", "serial,uart", APOLLO_UART_BASE, 8 << 2, 1);
+}
+
+static void apollo_timer_cb(void *opaque)
+{
+    qemu_irq irq = opaque;
+
+    qemu_irq_raise(irq);
+}
+
+static void apollo_init_timers(ApolloMachineState *ams)
+{
+    for (int i = 0; i < ams->num_cpus; i++) {
+        SRA32CPU *cpu = SRA32_CPU(ams->cpus[i]);
+        qemu_irq irq = qdev_get_gpio_in(DEVICE(&ams->lic), i);
+
+        cpu->local_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, apollo_timer_cb, irq);
+    }
 }
 
 static void apollo_machine_init(MachineState *machine)
 {
     ApolloMachineState *ams = APOLLO_MACHINE(machine);
-    SRA32CPU *cpu = SRA32_CPU(cpu_create(machine->cpu_type));
-    ams->cpus[0] = cpu;
-    ams->num_cpus = 1;
+    uint32_t smp_cpus = machine->smp.cpus;
+    ams->num_cpus = smp_cpus;
+
+    for (uint32_t i = 0; i < smp_cpus; i++) {
+        SRA32CPU *cpu = SRA32_CPU(cpu_create(machine->cpu_type));
+        if (cpu == NULL) {
+            qemu_log("Error while creating CPU.\n");
+            exit(1);
+        }
+
+        ams->cpus[i] = cpu;
+        ams->cpus[i]->env.regs[30] = i;
+        qemu_register_reset(sra32_cpu_reset_cb, cpu);
+    }
+
+    ams->ram_size = machine->ram_size;
 
     MemoryRegion *sysmem = get_system_memory();
-
-    qemu_register_reset(sra32_cpu_reset_cb, cpu);
 
     memory_region_init_ram(&ams->rom, NULL, "sra32.rom", APOLLO_ROM_SIZE, &error_fatal);
     memory_region_add_subregion(sysmem, APOLLO_ROM_BASE, &ams->rom);
@@ -137,14 +256,18 @@ static void apollo_machine_init(MachineState *machine)
         }
     }
 
+    apollo_init_fdt(ams);
+
     apollo_init_sic(ams);
+    apollo_init_lic(ams);
+    apollo_init_timers(ams);
 
     apollo_init_gpex_pcie(ams);
     apollo_init_ahci(ams);
     apollo_init_pl110(ams);
+    apollo_init_uart(ams);
 
-    qemu_irq uart_irq = qdev_get_gpio_in(DEVICE(&ams->sic), 1);
-    serial_mm_init(sysmem, APOLLO_UART_BASE, 2, uart_irq, 115200, serial_hd(0), DEVICE_LITTLE_ENDIAN);
+    apollo_copy_fdt(ams);
 }
 
 static void apollo_class_init(ObjectClass *oc, const void *data)
@@ -153,6 +276,7 @@ static void apollo_class_init(ObjectClass *oc, const void *data)
 
     mc->desc = "SRA32 Apollo Machine";
     mc->init = apollo_machine_init;
+    mc->max_cpus = CPU_MAX;
     mc->is_default = true;
     mc->default_cpu_type = SRA32_CPU_TYPE_NAME("generic");
 }
